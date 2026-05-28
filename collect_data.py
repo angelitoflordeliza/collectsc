@@ -1,0 +1,562 @@
+import cv2
+import numpy as np
+import os
+import sys
+import time
+from datetime import datetime
+import mediapipe as mp
+
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+hands = mp_hands.Hands(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+
+# ── UI Design Tokens (BGR color format) ──────────────────────────────────────
+_C_BG      = (22,  17,  15)   # #0F1116  deep navy background
+_C_PANEL   = (30,  26,  22)   # #161A1E  HUD panel fill
+_C_ACCENT  = (255, 170,   0)  # #00AAFF  electric blue
+_C_REC     = ( 80, 220,  60)  # #3CDC50  recording green
+_C_WAIT    = ( 40, 150, 255)  # #FF9628  standby amber
+_C_TEXT    = (245, 242, 240)  # #F0F2F5  primary text
+_C_MUTED   = (150, 145, 138)  # #8A9196  secondary text
+_C_DIM     = ( 60,  58,  55)  # #373A3C  separator / dim
+
+_TOP_H  = 110   # top HUD panel height (px, at native camera res)
+_BOT_H  =  72   # bottom HUD panel height
+_WIN    = "Dataset Collection"
+_fullscreen = False
+
+
+def _toggle_fullscreen():
+    """Toggle the OpenCV window between normal and fullscreen."""
+    global _fullscreen
+    _fullscreen = not _fullscreen
+    prop = cv2.WINDOW_FULLSCREEN if _fullscreen else cv2.WINDOW_NORMAL
+    cv2.setWindowProperty(_WIN, cv2.WND_PROP_FULLSCREEN, prop)
+
+
+def _draw_panel(canvas, y0, y1, alpha=0.82):
+    """Paint a semi-transparent dark panel over canvas rows [y0, y1)."""
+    roi = canvas[y0:y1]
+    overlay = np.full_like(roi, _C_PANEL)
+    cv2.addWeighted(overlay, alpha, roi, 1 - alpha, 0, roi)
+    canvas[y0:y1] = roi
+
+DATASET_PATH = "data/raw"
+VIDEO_DURATION = 1
+FPS = 30
+FRAME_COUNT = VIDEO_DURATION * FPS
+BREAK_TIME = 2  # seconds before each recording
+REST_TIME = 2   # seconds between different gestures
+
+GESTURES = [
+    ("Open_Palm", "hand fully open, fingers extended and spread"),
+    ("Fist", "hand fully closed, fingers curled into palm"),
+    ("Pinch", "thumb and index finger pressed together"),
+    ("Point", "index finger extended, other fingers curled"),
+    ("Two_Finger_V", "index and middle fingers extended in a V shape"),
+    ("Thumbs_Up", "fist with thumb pointing upward"),
+    ("Swipe", "open hand moving horizontally left or right"),
+    ("Push_Down", "open palm facing down, moving downward"),
+    ("Twist_Left", "pinch rotated counterclockwise (as if turning left)"),
+    ("Twist_Right", "pinch rotated clockwise (as if turning right)")
+]
+
+
+def get_next_session_idx(base_path):
+    """Scans base_path for directories starting with 'session',
+
+    parses their indices, and returns the next auto-incremented index.
+    """
+    if not os.path.exists(base_path):
+        return 1
+        
+    max_idx = 0
+    for entry in os.listdir(base_path):
+        full_path = os.path.join(base_path, entry)
+        if os.path.isdir(full_path) and entry.startswith("session"):
+            idx_str = entry[7:] # Extract string after "session"
+            if idx_str.isdigit():
+                idx = int(idx_str)
+                if idx > max_idx:
+                    max_idx = idx
+    return max_idx + 1
+
+
+def process_frame_with_hands(frame):
+    """Process frame with MediaPipe Hands and draw landmarks."""
+    # Convert BGR to RGB
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    # Process the frame
+    results = hands.process(rgb_frame)
+    # Draw landmarks if hands are detected
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+    return frame
+
+
+def add_black_border(frame, top=_TOP_H, bottom=_BOT_H, left=0, right=0, inner_color=(0, 0, 0)):
+    """Extend frame with styled dark HUD panels (top and bottom)."""
+    h, w = frame.shape[:2]
+    canvas = np.empty((h + top + bottom, w + left + right, 3), dtype=np.uint8)
+    canvas[:] = _C_BG
+    canvas[top:top + h, left:left + w] = frame
+
+    # Thin accent line between video and panels
+    border_color = inner_color if inner_color != (0, 0, 0) else _C_DIM
+    cv2.line(canvas, (left, top),         (left + w - 1, top),         border_color, 2)
+    cv2.line(canvas, (left, top + h - 1), (left + w - 1, top + h - 1), border_color, 2)
+
+    return canvas
+
+
+def draw_overlay(frame, gesture, description, status, countdown=None):
+    """Render a modern, minimal HUD overlay on the camera frame."""
+    is_recording = status == "RECORDING"
+    is_waiting   = status == "WAITING"
+
+    # Pick accent color per state
+    accent = _C_REC if is_recording else (_C_WAIT if is_waiting else _C_ACCENT)
+    line_color = accent if is_recording else (0, 0, 0)   # colored edge only when recording
+
+    frame = add_black_border(frame, top=_TOP_H, bottom=_BOT_H, left=0, right=0,
+                             inner_color=line_color)
+    h, w = frame.shape[:2]
+
+    # ── Semi-transparent HUD panels ──────────────────────────────────────────
+    _draw_panel(frame, 0, _TOP_H)
+    _draw_panel(frame, h - _BOT_H, h)
+
+    pad = 18   # horizontal padding inside panels
+
+    # ── TOP PANEL ────────────────────────────────────────────────────────────
+    # Gesture name (large)
+    cv2.putText(frame, gesture.replace("_", " "),
+                (pad, 38), cv2.FONT_HERSHEY_DUPLEX, 0.85, _C_TEXT, 1, cv2.LINE_AA)
+    # Description (muted, smaller)
+    cv2.putText(frame, description,
+                (pad, 64), cv2.FONT_HERSHEY_DUPLEX, 0.45, _C_MUTED, 1, cv2.LINE_AA)
+
+    # Animated pulsing dot (radius oscillates with time)
+    pulse = 0.5 + 0.5 * abs(time.time() % 1.0 - 0.5) * 2   # 0..1 sawtooth
+    dot_r = int(7 + 4 * pulse) if is_recording else 7
+    dot_cx = w - pad - 90
+    dot_cy = 38
+    cv2.circle(frame, (dot_cx, dot_cy), dot_r + 3, (*_C_DIM, ), -1, cv2.LINE_AA)
+    cv2.circle(frame, (dot_cx, dot_cy), dot_r,     accent,      -1, cv2.LINE_AA)
+
+    # Status label next to dot
+    status_label = "REC" if is_recording else ("READY" if is_waiting else "STANDBY")
+    cv2.putText(frame, status_label,
+                (dot_cx + dot_r + 6, dot_cy + 6),
+                cv2.FONT_HERSHEY_DUPLEX, 0.5, accent, 1, cv2.LINE_AA)
+
+    # Countdown timer (top-right)
+    if countdown is not None:
+        timer_str = f"{countdown}s"
+        (tw, _), _ = cv2.getTextSize(timer_str, cv2.FONT_HERSHEY_DUPLEX, 1.1, 2)
+        cv2.putText(frame, timer_str,
+                    (w - pad - tw, 68),
+                    cv2.FONT_HERSHEY_DUPLEX, 1.1, accent, 2, cv2.LINE_AA)
+
+    # ── BOTTOM PANEL ─────────────────────────────────────────────────────────
+    bot_y0 = h - _BOT_H
+
+    if is_recording:
+        line1 = "Recording in progress"
+        line2 = "Vary pose — keep the gesture shape"
+    elif is_waiting:
+        line1 = "Get ready"
+        line2 = "Position your hand for the gesture"
+    else:
+        line1 = "Standby"
+        line2 = status if len(status) < 52 else "Prepare for the next recording"
+
+    cv2.putText(frame, line1,
+                (pad, bot_y0 + 26),
+                cv2.FONT_HERSHEY_DUPLEX, 0.55, _C_TEXT,  1, cv2.LINE_AA)
+    cv2.putText(frame, line2,
+                (pad, bot_y0 + 52),
+                cv2.FONT_HERSHEY_DUPLEX, 0.45, _C_MUTED, 1, cv2.LINE_AA)
+
+    # F = fullscreen hint (bottom-right)
+    hint = "[F] fullscreen  [ESC] quit"
+    (hw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_DUPLEX, 0.38, 1)
+    cv2.putText(frame, hint,
+                (w - hw - pad, bot_y0 + 52),
+                cv2.FONT_HERSHEY_DUPLEX, 0.38, _C_DIM, 1, cv2.LINE_AA)
+
+    return frame
+
+
+def parse_gestures(text):
+    """Parse user gesture selection from free-form input."""
+    if not text:
+        return []
+
+    text = text.strip().lower()
+    text = text.replace(",", " ")
+    tokens = text.split()
+
+    selected = set()
+    for token in tokens:
+        if token in ("all", "a"):
+            return list(range(1, len(GESTURES) + 1))
+
+        if token in ("static", "statics"):
+            selected.update(range(1, 7))
+            continue
+
+        if token in ("moving", "move", "moves"):
+            selected.update(range(7, len(GESTURES) + 1))
+            continue
+
+        if token.isdigit():
+            n = int(token)
+            if 1 <= n <= len(GESTURES):
+                selected.add(n)
+            continue
+
+    return sorted(selected)
+
+
+def ask_gesture_selection():
+    print("\nSelect gestures to collect:")
+    for i, (gesture, desc) in enumerate(GESTURES, start=1):
+        group = "static" if i <= 6 else "moving"
+        print(f"  {i}: {gesture} ({group}) - {desc}")
+
+    print("Examples: '1 2 3', '1, 2, 3', 'static', 'moving', 'all', 'static, 7 8', '9 10 all'")
+
+    while True:
+        text = input("Enter gesture choices: ").strip()
+        if text.lower() in ("q", "quit", "exit"):
+            print("Program was terminated prematurely by user input")
+            sys.exit(0)
+
+        selected = parse_gestures(text)
+        if selected:
+            print(f"Selected gestures: {selected}")
+            return selected
+
+        print("No valid gestures found. Please enter again.")
+
+
+def ask_samples():
+    while True:
+        text = input("Enter number of videos per selected gesture: ").strip()
+        if text.lower() in ("q", "quit", "exit"):
+            print("Program was terminated prematurely by user input")
+            sys.exit(0)
+
+        if text.isdigit() and int(text) > 0:
+            return int(text)
+
+        print("Invalid number. Please enter a positive integer.")
+
+
+def ask_confirmation():
+    while True:
+        text = input("Proceed with gesture recording? (y/n): ").strip().lower()
+        if text in ("q", "quit", "exit"):
+            print("Program was terminated prematurely by user input")
+            sys.exit(0)
+        if text in ("y", "yes"):
+            return True
+        if text in ("n", "no"):
+            return False
+
+        print("Enter 'y' to proceed or 'n' to cancel.")
+
+
+def countdown_sleep(seconds, message, cap=None, gesture=None, description=None, next_gesture=None, next_description=None):
+    """Sleep with a visible countdown. If cap/gesture/description are given,
+
+    also renders the countdown on the live camera feed.
+    
+    next_gesture/next_description can be used to display upcoming gesture info during breaks.
+    """
+    for s in range(seconds, 0, -1):
+        print(f"{message}: {s}s   ", end="\r", flush=True)
+        if cap is not None:
+            deadline = time.time() + 1
+            while time.time() < deadline:
+                ret, frame = cap.read()
+                if not ret:
+                    time.sleep(0.03)
+                    continue
+                display_frame = cv2.flip(frame, 1)
+                # Use next gesture if available (for breaks between gestures)
+                display_gesture = next_gesture if next_gesture else gesture
+                display_description = next_description if next_description else description
+                display_frame = process_frame_with_hands(display_frame)
+                display_frame = draw_overlay(display_frame, display_gesture, display_description,
+                             f"{message} — {s}s remaining")
+                cv2.imshow(_WIN, display_frame)
+                key = cv2.waitKey(1)
+                if key == 27:
+                    return True   # signal early exit
+                if key in (ord('f'), ord('F')):
+                    _toggle_fullscreen()
+        else:
+            time.sleep(1)
+    print(" " * 80, end="\r")
+    return False
+
+
+def wait_for_enter(cap, gesture, description, next_gesture=None, next_description=None):
+    """Wait for user to press Enter key, showing next gesture info if available."""
+    print("Press Enter to continue to next gesture...")
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        
+        display_frame = cv2.flip(frame, 1)
+        # Show next gesture if available, otherwise current gesture
+        display_gesture = next_gesture if next_gesture else gesture
+        display_description = next_description if next_description else description
+        display_frame = process_frame_with_hands(display_frame)
+        status_msg = f"Press Enter to start {display_gesture}" if next_gesture else "Gesture completed - Press Enter to continue"
+        display_frame = draw_overlay(display_frame, display_gesture, display_description, status_msg)
+        cv2.imshow(_WIN, display_frame)
+
+        key = cv2.waitKey(1)
+        if key == 13:   # Enter
+            break
+        elif key == 27:  # ESC
+            return True
+        elif key in (ord('f'), ord('F')):
+            _toggle_fullscreen()
+    
+    return False
+
+
+def record_dataset(cap, selected_indices, samples_per_gesture):
+    session_files = []
+    stats = {}
+    session_start = datetime.now()
+    terminated = False
+
+    # 1. Detect and create the active session path
+    session_idx = get_next_session_idx(DATASET_PATH)
+    session_folder_name = f"session{session_idx:03d}"
+    session_path = os.path.join(DATASET_PATH, session_folder_name)
+    os.makedirs(session_path, exist_ok=True)
+
+    try:
+        for gesture_idx in selected_indices:
+            gesture, description = GESTURES[gesture_idx - 1]
+            print(f"\nCollecting gesture {gesture_idx}: {gesture}")
+
+            # 2. Create nested gesture directories under the current session path
+            gesture_folder = os.path.join(session_path, gesture)
+            os.makedirs(gesture_folder, exist_ok=True)
+
+            stats[gesture] = {"count": 0, "files": []}
+
+            for sample in range(samples_per_gesture):
+                start = time.time()
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        continue
+
+                    elapsed = time.time() - start
+                    remaining = int(BREAK_TIME - elapsed) + 1
+
+                    if remaining <= 0:
+                        break
+
+                    display_frame = cv2.flip(frame, 1)
+                    display_frame = process_frame_with_hands(display_frame)
+                    display_frame = draw_overlay(display_frame, gesture, description, "WAITING", countdown=remaining)
+                    cv2.imshow("Dataset Collection", display_frame)
+
+                    if cv2.waitKey(1) == 27:
+                        print("\nProgram was terminated prematurely by the user")
+                        terminated = True
+                        break
+
+                if terminated:
+                    break
+
+                frames = []
+                for _ in range(FRAME_COUNT):
+                    ret, frame = cap.read()
+                    if not ret:
+                        continue
+
+                    frames.append(frame.copy())
+
+                    preview_frame = cv2.flip(frame.copy(), 1)
+                    preview_frame = process_frame_with_hands(preview_frame)
+                    preview_frame = draw_overlay(preview_frame, gesture, description, "RECORDING")
+                    cv2.imshow("Dataset Collection", preview_frame)
+
+                    if cv2.waitKey(1) == 27:
+                        print("\nProgram was terminated prematurely by the user")
+                        terminated = True
+                        break
+
+                if terminated:
+                    break
+
+                # 3. Format self-documenting filename
+                timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+                filename = f"session{session_idx:03d}_{gesture}_vid{sample+1:03d}_{timestamp}.mp4"
+                video_path = os.path.join(gesture_folder, filename)
+
+                height, width, _ = frames[0].shape
+                writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"mp4v"), FPS, (width, height))
+                for f in frames:
+                    writer.write(f)
+                writer.release()
+
+                stats[gesture]["count"] += 1
+                stats[gesture]["files"].append(video_path)
+                session_files.append(video_path)
+
+                print(f"{gesture} sample {sample+1}/{samples_per_gesture} saved -> {filename}")
+
+            if terminated:
+                break
+
+            # Only rest if there are more gestures to collect
+            if gesture_idx != selected_indices[-1]:
+                # Get next gesture info
+                next_gesture_idx = selected_indices[selected_indices.index(gesture_idx) + 1]
+                next_gesture, next_description = GESTURES[next_gesture_idx - 1]
+                
+                # Wait for user to press Enter before starting rest countdown
+                print(f"\nGesture {gesture} completed! Prepare for next gesture: {next_gesture}")
+                quit_early = wait_for_enter(cap, gesture, description, next_gesture, next_description)
+                if quit_early:
+                    print("\nProgram was terminated prematurely by the user")
+                    terminated = True
+                    break
+                
+                print(f"Resting {REST_TIME}s before next gesture")
+                quit_early = countdown_sleep(
+                    REST_TIME, "Rest before next gesture",
+                    cap=cap, gesture=gesture, description=description,
+                    next_gesture=next_gesture, next_description=next_description
+                )
+                if quit_early:
+                    print("\nProgram was terminated prematurely by the user")
+                    terminated = True
+                    break
+
+        session_end = datetime.now()
+
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        hands.close()
+
+    if terminated:
+        print("\nSession was terminated prematurely by the user. Partial data has been saved.")
+
+    log_text = [f"Session started: {session_start}", f"Session ended:   {session_end}", ""]
+    for gesture, details in stats.items():
+        log_text.append(f"Gesture {gesture} - count: {details['count']}")
+        for path in details['files']:
+            log_text.append(f"  {path}")
+    log_text.append("")
+    log_text.append(f"Total files: {len(session_files)}")
+
+    # 4. Save the log file inside the current active session directory
+    log_name = datetime.now().strftime("session_log_%y%m%d_%H%M%S.txt")
+    log_path = os.path.join(session_path, log_name)
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(log_text))
+
+    print("\n=== Session Summary ===")
+    for line in log_text:
+        print(line)
+    print(f"Log saved to: {log_path}")
+
+    return stats, session_files, log_path
+
+
+if __name__ == "__main__":
+    print("\n  Gesture Dataset Collector")
+    print("  " + "─" * 34)
+    print("  Type 'q' at any prompt to quit.")
+    print("  Press F in the camera window to toggle fullscreen.")
+    print("  Press ESC during recording to stop early.\n")
+
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        raise RuntimeError("Cannot open webcam")
+
+    # Create resizable window once
+    cv2.namedWindow(_WIN, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(_WIN, 960, 640)
+
+    print("  Camera ready. Answer the prompts below.\n")
+
+    selected = ask_gesture_selection()
+    samples  = ask_samples()
+
+    if not ask_confirmation():
+        print("  Recording canceled.")
+        cap.release()
+        cv2.destroyAllWindows()
+        sys.exit(0)
+
+    # ── Startup / ready screen ────────────────────────────────────────────────
+    print("\n  Ready. Press Enter inside the camera window to begin.")
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        display = cv2.flip(frame, 1)
+        display = process_frame_with_hands(display)
+        display = add_black_border(display, top=_TOP_H, bottom=_BOT_H)
+        fh, fw = display.shape[:2]
+
+        # HUD panels
+        _draw_panel(display, 0, _TOP_H)
+        _draw_panel(display, fh - _BOT_H, fh)
+
+        pad = 18
+        # Top: title
+        cv2.putText(display, "Gesture Dataset Collector",
+                    (pad, 38), cv2.FONT_HERSHEY_DUPLEX, 0.8, _C_TEXT, 1, cv2.LINE_AA)
+        cv2.putText(display, f"  {len(selected)} gesture(s)  ·  {samples} sample(s) each",
+                    (pad, 64), cv2.FONT_HERSHEY_DUPLEX, 0.45, _C_MUTED, 1, cv2.LINE_AA)
+
+        # Pulsing accent dot
+        pulse = 0.5 + 0.5 * abs(time.time() % 1.0 - 0.5) * 2
+        dot_r = int(7 + 4 * pulse)
+        cv2.circle(display, (fw - pad - 12, 38), dot_r + 3, _C_DIM,    -1, cv2.LINE_AA)
+        cv2.circle(display, (fw - pad - 12, 38), dot_r,     _C_ACCENT, -1, cv2.LINE_AA)
+
+        # Bottom: instructions
+        bot_y0 = fh - _BOT_H
+        cv2.putText(display, "Press  Enter  to begin recording",
+                    (pad, bot_y0 + 28), cv2.FONT_HERSHEY_DUPLEX, 0.58, _C_ACCENT, 1, cv2.LINE_AA)
+        hint = "[F] fullscreen  [ESC] exit"
+        (hw2, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_DUPLEX, 0.38, 1)
+        cv2.putText(display, hint,
+                    (fw - hw2 - pad, bot_y0 + 54),
+                    cv2.FONT_HERSHEY_DUPLEX, 0.38, _C_DIM, 1, cv2.LINE_AA)
+
+        cv2.imshow(_WIN, display)
+        key = cv2.waitKey(1)
+        if key == 13:   # Enter
+            break
+        elif key == 27:  # ESC
+            cap.release()
+            cv2.destroyAllWindows()
+            sys.exit(0)
+        elif key in (ord('f'), ord('F')):
+            _toggle_fullscreen()
+
+    cv2.destroyAllWindows()
+
+    record_dataset(cap, selected, samples)
