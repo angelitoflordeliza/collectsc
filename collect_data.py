@@ -25,6 +25,7 @@ _TOP_H  = 110   # top HUD panel height (px, at native camera res)
 _BOT_H  =  72   # bottom HUD panel height
 _WIN    = "Dataset Collection"
 _fullscreen = False
+_paused    = False   # global pause flag (toggled by P key)
 
 
 def _toggle_fullscreen():
@@ -33,6 +34,12 @@ def _toggle_fullscreen():
     _fullscreen = not _fullscreen
     prop = cv2.WINDOW_FULLSCREEN if _fullscreen else cv2.WINDOW_NORMAL
     cv2.setWindowProperty(_WIN, cv2.WND_PROP_FULLSCREEN, prop)
+
+
+def _toggle_pause():
+    """Toggle the global pause state."""
+    global _paused
+    _paused = not _paused
 
 
 def _draw_panel(canvas, y0, y1, alpha=0.82):
@@ -111,7 +118,7 @@ def add_black_border(frame, top=_TOP_H, bottom=_BOT_H, left=0, right=0, inner_co
     return canvas
 
 
-def draw_overlay(frame, gesture, description, status, countdown=None):
+def draw_overlay(frame, gesture, description, status, countdown=None, paused=False, sample_info=None):
     """Render a modern, minimal HUD overlay on the camera frame."""
     is_recording = status == "RECORDING"
     is_waiting   = status == "WAITING"
@@ -138,10 +145,21 @@ def draw_overlay(frame, gesture, description, status, countdown=None):
     cv2.putText(frame, description,
                 (pad, 64), cv2.FONT_HERSHEY_DUPLEX, 0.45, _C_MUTED, 1, cv2.LINE_AA)
 
+    # Sample counter (top-right, e.g. "3 / 10")
+    if sample_info is not None:
+        si_label = f"#{sample_info}"
+        (si_w, si_h), _ = cv2.getTextSize(si_label, cv2.FONT_HERSHEY_DUPLEX, 0.72, 1)
+        si_x = w - pad - si_w
+        cv2.putText(frame, si_label,
+                    (si_x, 36), cv2.FONT_HERSHEY_DUPLEX, 0.72, _C_TEXT, 1, cv2.LINE_AA)
+        cv2.putText(frame, "sample",
+                    (si_x, 62), cv2.FONT_HERSHEY_DUPLEX, 0.38, _C_MUTED, 1, cv2.LINE_AA)
+
     # Animated pulsing dot (radius oscillates with time)
     pulse = 0.5 + 0.5 * abs(time.time() % 1.0 - 0.5) * 2   # 0..1 sawtooth
     dot_r = int(7 + 4 * pulse) if is_recording else 7
-    dot_cx = w - pad - 90
+    # shift dot left of sample counter when sample_info is shown
+    dot_cx = (w - pad - si_w - 12 - 90) if sample_info is not None else (w - pad - 90)
     dot_cy = 38
     cv2.circle(frame, (dot_cx, dot_cy), dot_r + 3, (*_C_DIM, ), -1, cv2.LINE_AA)
     cv2.circle(frame, (dot_cx, dot_cy), dot_r,     accent,      -1, cv2.LINE_AA)
@@ -152,7 +170,7 @@ def draw_overlay(frame, gesture, description, status, countdown=None):
                 (dot_cx + dot_r + 6, dot_cy + 6),
                 cv2.FONT_HERSHEY_DUPLEX, 0.5, accent, 1, cv2.LINE_AA)
 
-    # Countdown timer (top-right)
+    # Countdown timer (only when no sample_info shown, or below the counter)
     if countdown is not None:
         timer_str = f"{countdown}s"
         (tw, _), _ = cv2.getTextSize(timer_str, cv2.FONT_HERSHEY_DUPLEX, 1.1, 2)
@@ -180,12 +198,33 @@ def draw_overlay(frame, gesture, description, status, countdown=None):
                 (pad, bot_y0 + 52),
                 cv2.FONT_HERSHEY_DUPLEX, 0.45, _C_MUTED, 1, cv2.LINE_AA)
 
-    # F = fullscreen hint (bottom-right)
-    hint = "[F] fullscreen  [ESC] quit"
+    # Bottom-right hint (includes pause shortcut)
+    hint = "[P] pause  [F] fullscreen  [ESC] quit"
     (hw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_DUPLEX, 0.38, 1)
     cv2.putText(frame, hint,
                 (w - hw - pad, bot_y0 + 52),
                 cv2.FONT_HERSHEY_DUPLEX, 0.38, _C_DIM, 1, cv2.LINE_AA)
+
+    # ── PAUSED badge (centered, drawn last so it sits on top) ────────────────
+    if paused:
+        badge_text = "  PAUSED  "
+        badge_scale = 1.0
+        (bw, bh), bl = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_DUPLEX, badge_scale, 2)
+        bx = (w - bw) // 2
+        by = h // 2 + bh // 2
+        # dark pill background
+        cv2.rectangle(frame, (bx - 12, by - bh - bl - 8),
+                      (bx + bw + 12, by + 8), (20, 18, 16), -1, cv2.LINE_AA)
+        cv2.rectangle(frame, (bx - 12, by - bh - bl - 8),
+                      (bx + bw + 12, by + 8), _C_ACCENT, 2, cv2.LINE_AA)
+        cv2.putText(frame, badge_text,
+                    (bx, by), cv2.FONT_HERSHEY_DUPLEX, badge_scale, _C_ACCENT, 2, cv2.LINE_AA)
+        # sub-label
+        sub = "Press P to resume"
+        (sw, _), _ = cv2.getTextSize(sub, cv2.FONT_HERSHEY_DUPLEX, 0.42, 1)
+        cv2.putText(frame, sub,
+                    ((w - sw) // 2, by + 32),
+                    cv2.FONT_HERSHEY_DUPLEX, 0.42, _C_MUTED, 1, cv2.LINE_AA)
 
     return frame
 
@@ -276,12 +315,16 @@ def countdown_sleep(seconds, message, cap=None, gesture=None, description=None, 
     also renders the countdown on the live camera feed.
     
     next_gesture/next_description can be used to display upcoming gesture info during breaks.
+    Honors the global _paused flag — countdown freezes while paused.
     """
     for s in range(seconds, 0, -1):
         print(f"{message}: {s}s   ", end="\r", flush=True)
         if cap is not None:
             deadline = time.time() + 1
             while time.time() < deadline:
+                # Freeze countdown while paused
+                if _paused:
+                    deadline += 0.03   # keep extending deadline so timer doesn't advance
                 ret, frame = cap.read()
                 if not ret:
                     time.sleep(0.03)
@@ -292,13 +335,15 @@ def countdown_sleep(seconds, message, cap=None, gesture=None, description=None, 
                 display_description = next_description if next_description else description
                 display_frame = process_frame_with_hands(display_frame)
                 display_frame = draw_overlay(display_frame, display_gesture, display_description,
-                             f"{message} — {s}s remaining")
+                             f"{message} — {s}s remaining", paused=_paused)
                 cv2.imshow(_WIN, display_frame)
                 key = cv2.waitKey(1)
                 if key == 27:
                     return True   # signal early exit
                 if key in (ord('f'), ord('F')):
                     _toggle_fullscreen()
+                if key in (ord('p'), ord('P')):
+                    _toggle_pause()
         else:
             time.sleep(1)
     print(" " * 80, end="\r")
@@ -320,7 +365,8 @@ def wait_for_enter(cap, gesture, description, next_gesture=None, next_descriptio
         display_description = next_description if next_description else description
         display_frame = process_frame_with_hands(display_frame)
         status_msg = f"Press Enter to start {display_gesture}" if next_gesture else "Gesture completed - Press Enter to continue"
-        display_frame = draw_overlay(display_frame, display_gesture, display_description, status_msg)
+        display_frame = draw_overlay(display_frame, display_gesture, display_description,
+                                     status_msg, paused=_paused)
         cv2.imshow(_WIN, display_frame)
 
         key = cv2.waitKey(1)
@@ -330,6 +376,8 @@ def wait_for_enter(cap, gesture, description, next_gesture=None, next_descriptio
             return True
         elif key in (ord('f'), ord('F')):
             _toggle_fullscreen()
+        elif key in (ord('p'), ord('P')):
+            _toggle_pause()
     
     return False
 
@@ -358,8 +406,16 @@ def record_dataset(cap, selected_indices, samples_per_gesture):
             stats[gesture] = {"count": 0, "files": []}
 
             for sample in range(samples_per_gesture):
+                sample_label = f"{sample + 1} / {samples_per_gesture}"
+
+                # ── PRE-RECORDING WAIT (WAITING phase) ───────────────────────
                 start = time.time()
                 while True:
+                    # Freeze countdown while paused — slide start forward so
+                    # elapsed doesn't grow, and never allow the break while paused.
+                    if _paused:
+                        start = time.time()   # keep resetting start so elapsed stays ~0
+
                     ret, frame = cap.read()
                     if not ret:
                         continue
@@ -367,39 +423,56 @@ def record_dataset(cap, selected_indices, samples_per_gesture):
                     elapsed = time.time() - start
                     remaining = int(BREAK_TIME - elapsed) + 1
 
-                    if remaining <= 0:
+                    # Only exit the wait when NOT paused and time is up
+                    if remaining <= 0 and not _paused:
                         break
 
                     display_frame = cv2.flip(frame, 1)
                     display_frame = process_frame_with_hands(display_frame)
-                    display_frame = draw_overlay(display_frame, gesture, description, "WAITING", countdown=remaining)
-                    cv2.imshow("Dataset Collection", display_frame)
+                    display_frame = draw_overlay(
+                        display_frame, gesture, description, "WAITING",
+                        countdown=remaining, paused=_paused, sample_info=sample_label)
+                    cv2.imshow(_WIN, display_frame)
 
-                    if cv2.waitKey(1) == 27:
+                    key = cv2.waitKey(1)
+                    if key == 27:
                         print("\nProgram was terminated prematurely by the user")
                         terminated = True
                         break
+                    if key in (ord('p'), ord('P')):
+                        _toggle_pause()
+                    if key in (ord('f'), ord('F')):
+                        _toggle_fullscreen()
 
                 if terminated:
                     break
 
+                # ── RECORDING phase ──────────────────────────────────────────
+                # Pause is NOT allowed mid-recording; frames collected = FRAME_COUNT.
                 frames = []
-                for _ in range(FRAME_COUNT):
+                collected = 0
+                while collected < FRAME_COUNT:
                     ret, frame = cap.read()
                     if not ret:
                         continue
 
                     frames.append(frame.copy())
+                    collected += 1
 
                     preview_frame = cv2.flip(frame.copy(), 1)
                     preview_frame = process_frame_with_hands(preview_frame)
-                    preview_frame = draw_overlay(preview_frame, gesture, description, "RECORDING")
-                    cv2.imshow("Dataset Collection", preview_frame)
+                    preview_frame = draw_overlay(
+                        preview_frame, gesture, description, "RECORDING",
+                        sample_info=sample_label)
+                    cv2.imshow(_WIN, preview_frame)
 
-                    if cv2.waitKey(1) == 27:
+                    key = cv2.waitKey(1)
+                    if key == 27:
                         print("\nProgram was terminated prematurely by the user")
                         terminated = True
                         break
+                    if key in (ord('f'), ord('F')):
+                        _toggle_fullscreen()
 
                 if terminated:
                     break
@@ -486,6 +559,7 @@ if __name__ == "__main__":
     print("  " + "─" * 34)
     print("  Type 'q' at any prompt to quit.")
     print("  Press F in the camera window to toggle fullscreen.")
+    print("  Press P in the camera window to pause / resume between recordings.")
     print("  Press ESC during recording to stop early.\n")
 
     cap = cv2.VideoCapture(0)
@@ -540,7 +614,7 @@ if __name__ == "__main__":
         bot_y0 = fh - _BOT_H
         cv2.putText(display, "Press  Enter  to begin recording",
                     (pad, bot_y0 + 28), cv2.FONT_HERSHEY_DUPLEX, 0.58, _C_ACCENT, 1, cv2.LINE_AA)
-        hint = "[F] fullscreen  [ESC] exit"
+        hint = "[P] pause  [F] fullscreen  [ESC] exit"
         (hw2, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_DUPLEX, 0.38, 1)
         cv2.putText(display, hint,
                     (fw - hw2 - pad, bot_y0 + 54),
