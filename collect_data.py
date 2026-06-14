@@ -24,16 +24,7 @@ _C_DIM     = ( 60,  58,  55)  # #373A3C  separator / dim
 _TOP_H  = 110   # top HUD panel height (px, at native camera res)
 _BOT_H  =  72   # bottom HUD panel height
 _WIN    = "Dataset Collection"
-_fullscreen = False
 _paused    = False   # global pause flag (toggled by P key)
-
-
-def _toggle_fullscreen():
-    """Toggle the OpenCV window between normal and fullscreen."""
-    global _fullscreen
-    _fullscreen = not _fullscreen
-    prop = cv2.WINDOW_FULLSCREEN if _fullscreen else cv2.WINDOW_NORMAL
-    cv2.setWindowProperty(_WIN, cv2.WND_PROP_FULLSCREEN, prop)
 
 
 def _toggle_pause():
@@ -147,7 +138,7 @@ def draw_overlay(frame, gesture, description, status, countdown=None, paused=Fal
 
     # Sample counter (top-right, e.g. "3 / 10")
     if sample_info is not None:
-        si_label = f"#{sample_info}"
+        si_label = f"{sample_info}"
         (si_w, si_h), _ = cv2.getTextSize(si_label, cv2.FONT_HERSHEY_DUPLEX, 0.72, 1)
         si_x = w - pad - si_w
         cv2.putText(frame, si_label,
@@ -199,7 +190,7 @@ def draw_overlay(frame, gesture, description, status, countdown=None, paused=Fal
                 cv2.FONT_HERSHEY_DUPLEX, 0.45, _C_MUTED, 1, cv2.LINE_AA)
 
     # Bottom-right hint (includes pause shortcut)
-    hint = "[P] pause  [F] fullscreen  [ESC] quit"
+    hint = "[P] pause  [ESC] quit"
     (hw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_DUPLEX, 0.38, 1)
     cv2.putText(frame, hint,
                 (w - hw - pad, bot_y0 + 52),
@@ -340,8 +331,7 @@ def countdown_sleep(seconds, message, cap=None, gesture=None, description=None, 
                 key = cv2.waitKey(1)
                 if key == 27:
                     return True   # signal early exit
-                if key in (ord('f'), ord('F')):
-                    _toggle_fullscreen()
+
                 if key in (ord('p'), ord('P')):
                     _toggle_pause()
         else:
@@ -374,8 +364,7 @@ def wait_for_enter(cap, gesture, description, next_gesture=None, next_descriptio
             break
         elif key == 27:  # ESC
             return True
-        elif key in (ord('f'), ord('F')):
-            _toggle_fullscreen()
+
         elif key in (ord('p'), ord('P')):
             _toggle_pause()
     
@@ -441,8 +430,7 @@ def record_dataset(cap, selected_indices, samples_per_gesture):
                         break
                     if key in (ord('p'), ord('P')):
                         _toggle_pause()
-                    if key in (ord('f'), ord('F')):
-                        _toggle_fullscreen()
+
 
                 if terminated:
                     break
@@ -471,8 +459,7 @@ def record_dataset(cap, selected_indices, samples_per_gesture):
                         print("\nProgram was terminated prematurely by the user")
                         terminated = True
                         break
-                    if key in (ord('f'), ord('F')):
-                        _toggle_fullscreen()
+
 
                 if terminated:
                     break
@@ -558,7 +545,7 @@ if __name__ == "__main__":
     print("\n  Gesture Dataset Collector")
     print("  " + "─" * 34)
     print("  Type 'q' at any prompt to quit.")
-    print("  Press F in the camera window to toggle fullscreen.")
+    print("  The window is resizable — drag its edges to adjust.")
     print("  Press P in the camera window to pause / resume between recordings.")
     print("  Press ESC during recording to stop early.\n")
 
@@ -614,7 +601,7 @@ if __name__ == "__main__":
         bot_y0 = fh - _BOT_H
         cv2.putText(display, "Press  Enter  to begin recording",
                     (pad, bot_y0 + 28), cv2.FONT_HERSHEY_DUPLEX, 0.58, _C_ACCENT, 1, cv2.LINE_AA)
-        hint = "[P] pause  [F] fullscreen  [ESC] exit"
+        hint = "[P] pause  [ESC] exit"
         (hw2, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_DUPLEX, 0.38, 1)
         cv2.putText(display, hint,
                     (fw - hw2 - pad, bot_y0 + 54),
@@ -628,8 +615,7 @@ if __name__ == "__main__":
             cap.release()
             cv2.destroyAllWindows()
             sys.exit(0)
-        elif key in (ord('f'), ord('F')):
-            _toggle_fullscreen()
+
 
     cv2.destroyAllWindows()
 
