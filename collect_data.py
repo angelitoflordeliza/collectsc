@@ -1,7 +1,14 @@
+"""
+collect_data.py — Recording engine for the Gesture Dataset Collector.
+
+This module provides the camera HUD, overlay rendering, and the core
+record_dataset() function.  All terminal-prompt logic has been moved to
+gui.py / main.py.  Import this module; do not run it directly.
+"""
+
 import cv2
 import numpy as np
 import os
-import sys
 import time
 from datetime import datetime
 import mediapipe as mp
@@ -220,84 +227,9 @@ def draw_overlay(frame, gesture, description, status, countdown=None, paused=Fal
     return frame
 
 
-def parse_gestures(text):
-    """Parse user gesture selection from free-form input."""
-    if not text:
-        return []
-
-    text = text.strip().lower()
-    text = text.replace(",", " ")
-    tokens = text.split()
-
-    selected = set()
-    for token in tokens:
-        if token in ("all", "a"):
-            return list(range(1, len(GESTURES) + 1))
-
-        if token in ("static", "statics"):
-            selected.update(range(1, 7))
-            continue
-
-        if token in ("moving", "move", "moves"):
-            selected.update(range(7, len(GESTURES) + 1))
-            continue
-
-        if token.isdigit():
-            n = int(token)
-            if 1 <= n <= len(GESTURES):
-                selected.add(n)
-            continue
-
-    return sorted(selected)
-
-
-def ask_gesture_selection():
-    print("\nSelect gestures to collect:")
-    for i, (gesture, desc) in enumerate(GESTURES, start=1):
-        group = "static" if i <= 6 else "moving"
-        print(f"  {i}: {gesture} ({group}) - {desc}")
-
-    print("Examples: '1 2 3', '1, 2, 3', 'static', 'moving', 'all', 'static, 7 8', '9 10 all'")
-
-    while True:
-        text = input("Enter gesture choices: ").strip()
-        if text.lower() in ("q", "quit", "exit"):
-            print("Program was terminated prematurely by user input")
-            sys.exit(0)
-
-        selected = parse_gestures(text)
-        if selected:
-            print(f"Selected gestures: {selected}")
-            return selected
-
-        print("No valid gestures found. Please enter again.")
-
-
-def ask_samples():
-    while True:
-        text = input("Enter number of videos per selected gesture: ").strip()
-        if text.lower() in ("q", "quit", "exit"):
-            print("Program was terminated prematurely by user input")
-            sys.exit(0)
-
-        if text.isdigit() and int(text) > 0:
-            return int(text)
-
-        print("Invalid number. Please enter a positive integer.")
-
-
-def ask_confirmation():
-    while True:
-        text = input("Proceed with gesture recording? (y/n): ").strip().lower()
-        if text in ("q", "quit", "exit"):
-            print("Program was terminated prematurely by user input")
-            sys.exit(0)
-        if text in ("y", "yes"):
-            return True
-        if text in ("n", "no"):
-            return False
-
-        print("Enter 'y' to proceed or 'n' to cancel.")
+# Terminal-prompt functions (parse_gestures, ask_gesture_selection,
+# ask_samples, ask_confirmation) have been replaced by the CustomTkinter GUI
+# in gui.py.  They are intentionally omitted here.
 
 
 def countdown_sleep(seconds, message, cap=None, gesture=None, description=None, next_gesture=None, next_description=None):
@@ -541,82 +473,5 @@ def record_dataset(cap, selected_indices, samples_per_gesture):
     return stats, session_files, log_path
 
 
-if __name__ == "__main__":
-    print("\n  Gesture Dataset Collector")
-    print("  " + "─" * 34)
-    print("  Type 'q' at any prompt to quit.")
-    print("  The window is resizable — drag its edges to adjust.")
-    print("  Press P in the camera window to pause / resume between recordings.")
-    print("  Press ESC during recording to stop early.\n")
-
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        raise RuntimeError("Cannot open webcam")
-
-    # Create resizable window once
-    cv2.namedWindow(_WIN, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(_WIN, 960, 640)
-
-    print("  Camera ready. Answer the prompts below.\n")
-
-    selected = ask_gesture_selection()
-    samples  = ask_samples()
-
-    if not ask_confirmation():
-        print("  Recording canceled.")
-        cap.release()
-        cv2.destroyAllWindows()
-        sys.exit(0)
-
-    # ── Startup / ready screen ────────────────────────────────────────────────
-    print("\n  Ready. Press Enter inside the camera window to begin.")
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            continue
-
-        display = cv2.flip(frame, 1)
-        display = process_frame_with_hands(display)
-        display = add_black_border(display, top=_TOP_H, bottom=_BOT_H)
-        fh, fw = display.shape[:2]
-
-        # HUD panels
-        _draw_panel(display, 0, _TOP_H)
-        _draw_panel(display, fh - _BOT_H, fh)
-
-        pad = 18
-        # Top: title
-        cv2.putText(display, "Gesture Dataset Collector",
-                    (pad, 38), cv2.FONT_HERSHEY_DUPLEX, 0.8, _C_TEXT, 1, cv2.LINE_AA)
-        cv2.putText(display, f"  {len(selected)} gesture(s)  ·  {samples} sample(s) each",
-                    (pad, 64), cv2.FONT_HERSHEY_DUPLEX, 0.45, _C_MUTED, 1, cv2.LINE_AA)
-
-        # Pulsing accent dot
-        pulse = 0.5 + 0.5 * abs(time.time() % 1.0 - 0.5) * 2
-        dot_r = int(7 + 4 * pulse)
-        cv2.circle(display, (fw - pad - 12, 38), dot_r + 3, _C_DIM,    -1, cv2.LINE_AA)
-        cv2.circle(display, (fw - pad - 12, 38), dot_r,     _C_ACCENT, -1, cv2.LINE_AA)
-
-        # Bottom: instructions
-        bot_y0 = fh - _BOT_H
-        cv2.putText(display, "Press  Enter  to begin recording",
-                    (pad, bot_y0 + 28), cv2.FONT_HERSHEY_DUPLEX, 0.58, _C_ACCENT, 1, cv2.LINE_AA)
-        hint = "[P] pause  [ESC] exit"
-        (hw2, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_DUPLEX, 0.38, 1)
-        cv2.putText(display, hint,
-                    (fw - hw2 - pad, bot_y0 + 54),
-                    cv2.FONT_HERSHEY_DUPLEX, 0.38, _C_DIM, 1, cv2.LINE_AA)
-
-        cv2.imshow(_WIN, display)
-        key = cv2.waitKey(1)
-        if key == 13:   # Enter
-            break
-        elif key == 27:  # ESC
-            cap.release()
-            cv2.destroyAllWindows()
-            sys.exit(0)
-
-
-    cv2.destroyAllWindows()
-
-    record_dataset(cap, selected, samples)
+# The __main__ block has been moved to main.py.
+# Run the application with:  python src/main.py
